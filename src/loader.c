@@ -2,7 +2,7 @@
  * Loads syscall_trace BPF (CO-RE skeleton), sets target PID filter, attaches
  * raw_syscalls:sys_enter, and prints ring buffer events. Run as root.
  *
- * Usage: sudo ./build/syscall_trace_loader -p PID [-n MAX_EVENTS]
+ * Usage: sudo ./build/syscall_trace_loader -p PID [-n MAX_EVENTS] [-o FILE] [-v]
  *   PID 0 = trace all PIDs (heavy).
  */
 
@@ -34,6 +34,12 @@ struct event {
 	uint64_t args[6];
 };
 
+struct rb_ctx {
+	uint64_t *remain;
+	FILE *out;
+	int csv;
+};
+
 static volatile sig_atomic_t stop;
 
 static void on_sigint(int sig)
@@ -55,8 +61,10 @@ static void bump_memlock_rlimit(void)
 
 static int handle_event(void *ctx, void *data, size_t data_sz)
 {
-	uint64_t *remain = ctx;
+	struct rb_ctx *c = ctx;
+	uint64_t *remain = c->remain;
 	const struct event *e = data;
+	FILE *out = c->out;
 
 	if (data_sz < sizeof(*e)) {
 		fprintf(stderr, "short ringbuf sample: %zu\n", data_sz);
@@ -73,10 +81,18 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 		return 1;
 	}
 
-	printf("%" PRIu64 " %u %u", e->ts_ns, e->pid, e->syscall_id);
-	for (int i = 0; i < 6; i++)
-		printf(" %" PRIu64, e->args[i]);
-	printf("\n");
+	if (c->csv) {
+		fprintf(out, "%" PRIu64 ",%u,%u", e->ts_ns, e->pid, e->syscall_id);
+		for (int i = 0; i < 6; i++)
+			fprintf(out, ",%" PRIu64, e->args[i]);
+		fprintf(out, "\n");
+	} else {
+		fprintf(out, "%" PRIu64 " %u %u", e->ts_ns, e->pid, e->syscall_id);
+		for (int i = 0; i < 6; i++)
+			fprintf(out, " %" PRIu64, e->args[i]);
+		fprintf(out, "\n");
+	}
+	fflush(out);
 
 	if (remain) {
 		(*remain)--;
@@ -90,27 +106,53 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 
 static void usage(const char *argv0)
 {
-	fprintf(stderr, "usage: %s -p PID [-n MAX_EVENTS]\n", argv0);
+	fprintf(stderr, "usage: %s -p PID [-n MAX_EVENTS] [-o FILE] [-v]\n", argv0);
 	fprintf(stderr, "  -p PID          filter to this PID (0 = all PIDs)\n");
 	fprintf(stderr, "  -n MAX_EVENTS   exit after this many events (>=1; 0 = unlimited)\n");
+	fprintf(stderr, "  -o FILE         write CSV to FILE (use - for stdout CSV)\n");
+	fprintf(stderr, "  -v              verbose libbpf messages (default: quiet)\n");
 }
 
 int main(int argc, char **argv)
 {
 	struct syscall_trace_bpf *skel = NULL;
 	struct ring_buffer *rb = NULL;
+	struct rb_ctx rb_ctx = { .remain = NULL, .out = stdout, .csv = 0 };
+	FILE *out_file = NULL;
+	int out_needs_fclose = 0;
+	int verbose = 0;
 	uint32_t target_pid = (uint32_t)-1;
 	uint64_t remain = 0;
 	int opt;
 	int err;
 
-	while ((opt = getopt(argc, argv, "p:n:h")) != -1) {
+	while ((opt = getopt(argc, argv, "p:n:o:vh")) != -1) {
 		switch (opt) {
 		case 'p':
 			target_pid = (uint32_t)strtoul(optarg, NULL, 10);
 			break;
 		case 'n':
 			remain = strtoull(optarg, NULL, 10);
+			break;
+		case 'o':
+			if (strcmp(optarg, "-") == 0) {
+				rb_ctx.out = stdout;
+				rb_ctx.csv = 1;
+			} else {
+				out_file = fopen(optarg, "w");
+				if (!out_file) {
+					fprintf(stderr, "%s: ", optarg);
+					perror("fopen");
+					return 1;
+				}
+				setvbuf(out_file, NULL, _IOLBF, 0);
+				rb_ctx.out = out_file;
+				rb_ctx.csv = 1;
+				out_needs_fclose = 1;
+			}
+			break;
+		case 'v':
+			verbose = 1;
 			break;
 		case 'h':
 			usage(argv[0]);
@@ -126,8 +168,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	rb_ctx.remain = remain ? &remain : NULL;
+
 	bump_memlock_rlimit();
-	libbpf_set_print(libbpf_print);
+	libbpf_set_print(verbose ? libbpf_print : NULL);
 
 	signal(SIGINT, on_sigint);
 	signal(SIGTERM, on_sigint);
@@ -135,7 +179,8 @@ int main(int argc, char **argv)
 	skel = syscall_trace_bpf__open();
 	if (!skel) {
 		fprintf(stderr, "syscall_trace_bpf__open failed\n");
-		return 1;
+		err = -1;
+		goto cleanup;
 	}
 
 	skel->rodata->target_pid = target_pid;
@@ -152,15 +197,22 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	rb = ring_buffer__new(bpf_map__fd(skel->maps.events), handle_event,
-			      remain ? &remain : NULL, NULL);
+	rb = ring_buffer__new(bpf_map__fd(skel->maps.events), handle_event, &rb_ctx,
+			      NULL);
 	if (!rb) {
 		err = -errno;
 		fprintf(stderr, "ring_buffer__new failed: %d\n", err);
 		goto cleanup;
 	}
 
-	printf("# ts_ns pid syscall_id arg0 arg1 arg2 arg3 arg4 arg5\n");
+	if (rb_ctx.csv)
+		fprintf(rb_ctx.out,
+			"ts_ns,pid,syscall_id,arg0,arg1,arg2,arg3,arg4,arg5\n");
+	else
+		fprintf(rb_ctx.out,
+			"# ts_ns pid syscall_id arg0 arg1 arg2 arg3 arg4 arg5\n");
+	fflush(rb_ctx.out);
+
 	while (!stop) {
 		err = ring_buffer__poll(rb, 100);
 		if (err == -EINTR) {
@@ -176,5 +228,7 @@ int main(int argc, char **argv)
 cleanup:
 	ring_buffer__free(rb);
 	syscall_trace_bpf__destroy(skel);
+	if (out_needs_fclose && out_file)
+		fclose(out_file);
 	return err < 0 ? 1 : 0;
 }
