@@ -1,0 +1,7 @@
+build/
+*.o
+*.skel.h
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
