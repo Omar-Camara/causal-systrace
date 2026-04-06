@@ -1,0 +1,7 @@
+# Analysis stack for Causal-SysTrace (install in venv: python3 -m venv .venv && . .venv/bin/activate)
+pandas>=2.0.0
+numpy>=1.24.0
+networkx>=3.0
+
+# PC / continuous causal discovery (pulls heavier deps; install when needed)
+# cdt>=0.6.0

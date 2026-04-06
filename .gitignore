@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+# Trace captures (large)
+data/*.csv
+traces/*.csv
+trace.csv
