@@ -1,0 +1,18 @@
+[
+  {
+    "directory": ".",
+    "file": "src/loader.c",
+    "arguments": [
+      "clang",
+      "-std=c17",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-Ibuild",
+      "-Ithird_party/ide",
+      "-Ithird_party/libbpf/include",
+      "-c",
+      "src/loader.c"
+    ]
+  }
+]

@@ -1,0 +1,4 @@
+-std=c17
+-Ibuild
+-Ithird_party/ide
+-Ithird_party/libbpf/include

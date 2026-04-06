@@ -1,0 +1,10 @@
+Vendored libbpf UAPI headers for editor IntelliSense on hosts without Linux kernel headers.
+
+Upstream: https://github.com/libbpf/libbpf
+Files under include/bpf/: tag v1.4.7 (libbpf.h, libbpf_common.h, libbpf_legacy.h, libbpf_version.h)
+
+include/linux/bpf.h and include/linux/bpf_common.h: same tag.
+
+include/linux/types.h: minimal stub (see file header) replacing the full UAPI chain.
+
+SPDX: (LGPL-2.1 OR BSD-2-Clause) / GPL-2.0 WITH Linux-syscall-note as marked in each file.

@@ -1,6 +1,5 @@
 build/
 *.o
-*.skel.h
 __pycache__/
 *.pyc
 .venv/

@@ -120,23 +120,23 @@ int main(int argc, char **argv)
 	signal(SIGINT, on_sigint);
 	signal(SIGTERM, on_sigint);
 
-	skel = syscall_trace__open();
+	skel = syscall_trace_bpf__open();
 	if (!skel) {
-		fprintf(stderr, "syscall_trace__open failed\n");
+		fprintf(stderr, "syscall_trace_bpf__open failed\n");
 		return 1;
 	}
 
 	skel->rodata->target_pid = target_pid;
 
-	err = syscall_trace__load(skel);
+	err = syscall_trace_bpf__load(skel);
 	if (err) {
-		fprintf(stderr, "syscall_trace__load failed: %d\n", err);
+		fprintf(stderr, "syscall_trace_bpf__load failed: %d\n", err);
 		goto cleanup;
 	}
 
-	err = syscall_trace__attach(skel);
+	err = syscall_trace_bpf__attach(skel);
 	if (err) {
-		fprintf(stderr, "syscall_trace__attach failed: %d\n", err);
+		fprintf(stderr, "syscall_trace_bpf__attach failed: %d\n", err);
 		goto cleanup;
 	}
 
@@ -163,6 +163,6 @@ int main(int argc, char **argv)
 
 cleanup:
 	ring_buffer__free(rb);
-	syscall_trace__destroy(skel);
+	syscall_trace_bpf__destroy(skel);
 	return err < 0 ? 1 : 0;
 }
