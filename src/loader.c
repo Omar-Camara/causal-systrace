@@ -55,7 +55,7 @@ static void bump_memlock_rlimit(void)
 
 static int handle_event(void *ctx, void *data, size_t data_sz)
 {
-	uint64_t *count = ctx;
+	uint64_t *remain = ctx;
 	const struct event *e = data;
 
 	if (data_sz < sizeof(*e)) {
@@ -63,15 +63,27 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 		return 0;
 	}
 
+	/*
+	 * libbpf may deliver many samples in one ring_buffer__poll(); returning
+	 * non-zero stops further callbacks in this batch. Without that, we'd
+	 * print past N and uint64_t *remain would underflow after hitting 0.
+	 */
+	if (remain && *remain == 0) {
+		stop = 1;
+		return 1;
+	}
+
 	printf("%" PRIu64 " %u %u", e->ts_ns, e->pid, e->syscall_id);
 	for (int i = 0; i < 6; i++)
 		printf(" %" PRIu64, e->args[i]);
 	printf("\n");
 
-	if (count) {
-		(*count)--;
-		if (*count == 0)
+	if (remain) {
+		(*remain)--;
+		if (*remain == 0) {
 			stop = 1;
+			return 1;
+		}
 	}
 	return 0;
 }
@@ -80,7 +92,7 @@ static void usage(const char *argv0)
 {
 	fprintf(stderr, "usage: %s -p PID [-n MAX_EVENTS]\n", argv0);
 	fprintf(stderr, "  -p PID          filter to this PID (0 = all PIDs)\n");
-	fprintf(stderr, "  -n MAX_EVENTS   exit after this many events (default: run until Ctrl+C)\n");
+	fprintf(stderr, "  -n MAX_EVENTS   exit after this many events (>=1; 0 = unlimited)\n");
 }
 
 int main(int argc, char **argv)
