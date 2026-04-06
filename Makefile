@@ -18,6 +18,7 @@ SHELL := /bin/bash
 # Output:
 #   build/syscall_trace.bpf.o
 #   build/syscall_trace.skel.h
+#   build/syscall_trace_loader   (userspace; needs libbpf + gcc)
 
 .PHONY: all clean check-env dirs
 
@@ -55,7 +56,14 @@ VMLINUX_H     := $(BUILD_DIR)/vmlinux.h
 BPF_OBJ       := $(BUILD_DIR)/$(APP).bpf.o
 SKEL_H        := $(BUILD_DIR)/$(APP).skel.h
 
-all: check-env dirs $(SKEL_H)
+CC            ?= gcc
+USER_CFLAGS   ?= -O2 -g -Wall -Wextra -Werror -I$(BUILD_DIR)
+USER_LDFLAGS  ?= -lbpf -lelf -lz
+
+LOADER_SRC    ?= src/loader.c
+LOADER_BIN    ?= $(BUILD_DIR)/$(APP)_loader
+
+all: check-env dirs $(LOADER_BIN)
 
 dirs:
 	@mkdir -p $(BUILD_DIR)
@@ -80,6 +88,10 @@ $(BPF_OBJ): $(BPF_PROG) $(VMLINUX_H) | dirs
 $(SKEL_H): $(BPF_OBJ) | dirs
 	@echo "Generating skeleton header $@"
 	@$(BPFOOL) gen skeleton "$<" > "$@"
+
+$(LOADER_BIN): $(LOADER_SRC) $(SKEL_H) | dirs
+	@echo "Building userspace loader $@"
+	@$(CC) $(USER_CFLAGS) -o "$@" "$(LOADER_SRC)" $(USER_LDFLAGS)
 
 clean:
 	@rm -rf "$(BUILD_DIR)"
