@@ -41,9 +41,13 @@ int handle_sys_enter(struct trace_event_raw_sys_enter *ctx)
 	e->pid = pid;
 	e->syscall_id = (__u32)ctx->id;
 
-#pragma unroll
-	for (int i = 0; i < 6; i++)
-		e->args[i] = ctx->args[i];
+	/* Constant indices only — indexed loop can hit "modified ctx ptr" verifier errors. */
+	e->args[0] = ctx->args[0];
+	e->args[1] = ctx->args[1];
+	e->args[2] = ctx->args[2];
+	e->args[3] = ctx->args[3];
+	e->args[4] = ctx->args[4];
+	e->args[5] = ctx->args[5];
 
 	bpf_ringbuf_submit(e, 0);
 	return 0;
