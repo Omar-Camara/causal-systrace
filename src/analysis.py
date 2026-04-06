@@ -4,7 +4,8 @@ Load CSV produced by syscall_trace_loader (-o FILE) and print summary stats.
 
 Example:
   python src/analysis.py trace.csv
-  python src/analysis.py /tmp/trace.csv --head 5
+  python src/analysis.py trace.csv --enrich --head 10
+  python src/analysis.py trace.csv --enrich --export-enriched data/enriched.csv
 """
 
 from __future__ import annotations
@@ -101,6 +102,72 @@ def syscall_name(nr: int, m: dict[int, str]) -> str:
     return m.get(int(nr), "?")
 
 
+# Linux: which arg slot holds an fd for common syscalls (sys_enter args match the syscall ABI).
+_FD_ARG: dict[str, int] = {
+    "read": 0,
+    "write": 0,
+    "close": 0,
+    "readv": 0,
+    "writev": 0,
+    "pread64": 0,
+    "pwrite64": 0,
+    "ioctl": 0,
+    "fsync": 0,
+    "fdatasync": 0,
+    "recvfrom": 0,
+    "sendto": 0,
+    "mmap": 4,
+}
+
+
+def infer_fd_for_name(name: str, row) -> int | None:
+    if name == "?" or not name:
+        return None
+    idx = _FD_ARG.get(name)
+    if idx is None:
+        return None
+    key = f"arg{idx}"
+    if key not in row.index:
+        return None
+    try:
+        v = int(row[key])
+    except (TypeError, ValueError):
+        return None
+    return v
+
+
+def enrich_dataframe(df, sc_map: dict[int, str], pd):
+    """Add syscall_name, fd (when inferrable), channel (for grouping)."""
+    out = df.copy()
+    out["syscall_name"] = out["syscall_id"].map(
+        lambda x: syscall_name(int(x), sc_map)
+    )
+
+    def fd_one(row):
+        v = infer_fd_for_name(row["syscall_name"], row)
+        return v if v is not None else pd.NA
+
+    out["fd"] = out.apply(fd_one, axis=1)
+    try:
+        out["fd"] = out["fd"].astype("Int64")
+    except (TypeError, ValueError):
+        pass
+
+    def channel_one(row):
+        pid = int(row["pid"])
+        nm = row["syscall_name"]
+        fd = row["fd"]
+        if pd.notna(fd):
+            try:
+                return f"{pid}:fd:{int(fd)}"
+            except (TypeError, ValueError):
+                pass
+        return f"{pid}:sc:{nm}"
+
+    out["channel"] = out.apply(channel_one, axis=1)
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Summarize syscall trace CSV from syscall_trace_loader."
@@ -121,6 +188,17 @@ def main() -> int:
         action="store_true",
         help="Do not resolve syscall_id to names (faster, no /usr include needed)",
     )
+    parser.add_argument(
+        "--enrich",
+        action="store_true",
+        help="Add syscall_name, fd (when inferrable), and channel (pid:fd:… or pid:sc:NAME)",
+    )
+    parser.add_argument(
+        "--export-enriched",
+        metavar="PATH",
+        default="",
+        help="Write enriched CSV (requires --enrich and syscall names)",
+    )
     args = parser.parse_args()
 
     try:
@@ -138,6 +216,8 @@ def main() -> int:
         sc_map, sc_src = load_syscall_map()
         if sc_src:
             print(f"syscall names: {sc_src}", file=sys.stderr)
+    else:
+        sc_map = {}
 
     try:
         df = pd.read_csv(args.csv)
@@ -188,15 +268,43 @@ def main() -> int:
         else:
             print(f"  {sid_i}: {int(cnt)}")
 
+    enriched = None
+    if args.enrich:
+        if not sc_map:
+            print(
+                "enrich needs syscall names (drop --no-syscall-names)",
+                file=sys.stderr,
+            )
+            return 1
+        enriched = enrich_dataframe(df, sc_map, pd)
+        top_ch = enriched["channel"].value_counts().head(12)
+        print("top channel (count) [pid:fd:… or pid:sc:NAME]:")
+        for ch, cnt in top_ch.items():
+            print(f"  {ch}: {int(cnt)}")
+
+    if args.export_enriched:
+        if enriched is None:
+            print("--export-enriched requires --enrich", file=sys.stderr)
+            return 1
+        try:
+            enriched.to_csv(args.export_enriched, index=False)
+        except OSError as e:
+            print(f"export failed: {e}", file=sys.stderr)
+            return 1
+        print(f"wrote {args.export_enriched}", file=sys.stderr)
+
     if args.head > 0:
         print(f"\nfirst {args.head} rows:")
-        show = df.head(args.head).copy()
-        if sc_map:
-            show.insert(
-                3,
-                "syscall_name",
-                show["syscall_id"].map(lambda x: syscall_name(int(x), sc_map)),
-            )
+        if enriched is not None:
+            show = enriched.head(args.head)
+        else:
+            show = df.head(args.head).copy()
+            if sc_map:
+                show.insert(
+                    3,
+                    "syscall_name",
+                    show["syscall_id"].map(lambda x: syscall_name(int(x), sc_map)),
+                )
         print(show.to_string(index=False))
 
     return 0
