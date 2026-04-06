@@ -44,7 +44,7 @@ endif
 
 # Prefer system include paths. On Ubuntu with libbpf-dev:
 #   /usr/include/bpf/*.h and /usr/include/linux/*.h exist.
-INCLUDES      ?= -I/usr/include -I/usr/include/bpf -I/usr/include/linux $(LIBBPF_INC)
+INCLUDES      ?= -I$(BUILD_DIR) -I/usr/include -I/usr/include/bpf -I/usr/include/linux $(LIBBPF_INC)
 
 # Minimal, portable BPF CFLAGS. We rely on CO-RE + BTF for kernel struct layouts.
 BPF_CFLAGS    ?= -O2 -g -target bpf -D__TARGET_ARCH_$(shell uname -m | sed 's/x86_64/x86/; s/aarch64/arm64/; s/ppc64le/powerpc/') \
