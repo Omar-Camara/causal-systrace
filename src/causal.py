@@ -8,7 +8,8 @@ Heuristic: for channels A,B, score = corr(A.shift(1), B) on time-bucket counts.
 If |score| >= threshold, emit edge A -> B (exploratory, not a formal causal claim).
 
 Example:
-  python src/causal.py data/enriched.csv --window-ms 5 --dot data/graph.dot
+  python src/causal.py data/enriched.csv --auto-window --dot data/graph.dot
+  python src/causal.py data/enriched.csv --window-ms 0.0005 --min-buckets 2 --dot data/graph.dot
   dot -Tpng data/graph.dot -o data/graph.png
 """
 
@@ -65,7 +66,12 @@ def main() -> int:
         "--window-ms",
         type=float,
         default=10.0,
-        help="Time bucket size in milliseconds (default: 10)",
+        help="Time bucket size in ms (default: 10). For ~ms-long traces, use a much smaller value or --auto-window.",
+    )
+    parser.add_argument(
+        "--auto-window",
+        action="store_true",
+        help="Pick bucket width from trace span so roughly (min-buckets+2) buckets fit (overrides --window-ms)",
     )
     parser.add_argument(
         "--threshold",
@@ -126,19 +132,44 @@ def main() -> int:
         df = mod.enrich_dataframe(df, sc_map, pd)
 
     ts = df["ts_ns"].astype("uint64")
-    window_ns = max(1, int(args.window_ms * 1_000_000))
+    t_min, t_max = int(ts.min()), int(ts.max())
+    span_ns = max(1, t_max - t_min + 1)
+    span_ms = span_ns / 1e6
+
+    if args.auto_window:
+        target = max(args.min_buckets, 2) + 2
+        window_ns = max(1, span_ns // target)
+        used_ms = window_ns / 1e6
+        print(
+            f"auto-window: span~{span_ms:.6f} ms -> bucket ~{used_ms:.6f} ms ({target} target slices)",
+            file=sys.stderr,
+        )
+    else:
+        window_ns = max(1, int(args.window_ms * 1_000_000))
+
     df = df.copy()
     df["t_bucket"] = (ts // window_ns).astype("int64")
 
     counts = df.groupby(["t_bucket", "channel"], observed=False).size().unstack(
         fill_value=0
     )
-    if counts.shape[0] < args.min_buckets:
+    n_bk = counts.shape[0]
+    if n_bk < args.min_buckets:
+        suggest_ms = max(span_ms / max(args.min_buckets + 1, 3), 1e-9)
         print(
-            f"only {counts.shape[0]} time buckets (need --min-buckets {args.min_buckets}); "
-            "capture more events or shrink --window-ms",
+            f"only {n_bk} time buckets (need >= {args.min_buckets}); "
+            f"trace span ~{span_ms:.6f} ms",
             file=sys.stderr,
         )
+        print(
+            f"  try: --auto-window   or   --window-ms {suggest_ms:.9f}",
+            file=sys.stderr,
+        )
+        if n_bk >= 2:
+            print(
+                f"  or: --min-buckets {n_bk} (only if you accept coarse lag-corr)",
+                file=sys.stderr,
+            )
         return 1
 
     pivot = counts.astype("float64")

@@ -40,7 +40,8 @@ python src/analysis.py data/raw.csv --enrich --export-enriched data/enriched.csv
 ## Causal preview (bucketed counts + lag-corr edges)
 
 ```bash
-python src/causal.py data/enriched.csv --window-ms 10 --threshold 0.35 --dot data/graph.dot
+python src/causal.py data/enriched.csv --auto-window --threshold 0.35 --dot data/graph.dot
+# Short traces (< few ms): --auto-window or a tiny --window-ms (e.g. 0.0005); see tool hints.
 dot -Tpng data/graph.dot -o data/graph.png   # needs system graphviz
 ```
 
