@@ -17,6 +17,7 @@
 #include <bpf/libbpf.h>
 #include <stdarg.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 
 #include "syscall_trace.skel.h"
 
@@ -32,6 +33,9 @@ struct event {
 	uint32_t pid;
 	uint32_t syscall_id;
 	uint64_t args[6];
+	uint8_t evt_kind;
+	uint8_t _pad[7];
+	char path[256];
 };
 
 struct rb_ctx {
@@ -59,6 +63,56 @@ static void bump_memlock_rlimit(void)
 		fprintf(stderr, "warning: setrlimit(RLIMIT_MEMLOCK): %s\n", strerror(errno));
 }
 
+static void fputc_csv_escaped(FILE *out, const char *s)
+{
+	int need_quote = 0;
+
+	if (!s || !s[0]) {
+		return;
+	}
+	for (const char *p = s; *p; ++p) {
+		if (*p == ',' || *p == '"' || *p == '\n' || *p == '\r') {
+			need_quote = 1;
+			break;
+		}
+	}
+	if (!need_quote) {
+		fputs(s, out);
+		return;
+	}
+	fputc('"', out);
+	for (; *s; ++s) {
+		if (*s == '"')
+			fputs("\"\"", out);
+		else
+			fputc(*s, out);
+	}
+	fputc('"', out);
+}
+
+static void print_path_space(FILE *out, const char *s)
+{
+	fputc(' ', out);
+	if (!s || !s[0]) {
+		fputc('-', out);
+		return;
+	}
+	fputc('"', out);
+	for (; *s; ++s) {
+		if (*s == '"' || *s == '\\') {
+			fputc('\\', out);
+			fputc(*s, out);
+		} else if (*s == '\n') {
+			fputs("\\n", out);
+		} else if (*s == '\r') {
+			fputs("\\r", out);
+		} else {
+			fputc(*s, out);
+		}
+	}
+	fputc('"', out);
+}
+
 static int handle_event(void *ctx, void *data, size_t data_sz)
 {
 	struct rb_ctx *c = ctx;
@@ -67,7 +121,8 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 	FILE *out = c->out;
 
 	if (data_sz < sizeof(*e)) {
-		fprintf(stderr, "short ringbuf sample: %zu\n", data_sz);
+		fprintf(stderr, "short ringbuf sample: %zu (expected %zu)\n", data_sz,
+			sizeof(*e));
 		return 0;
 	}
 
@@ -85,12 +140,15 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 		fprintf(out, "%" PRIu64 ",%u,%u", e->ts_ns, e->pid, e->syscall_id);
 		for (int i = 0; i < 6; i++)
 			fprintf(out, ",%" PRIu64, e->args[i]);
-		fprintf(out, "\n");
+		fputc(',', out);
+		fputc_csv_escaped(out, e->path);
+		fprintf(out, ",%u\n", (unsigned int)e->evt_kind);
 	} else {
 		fprintf(out, "%" PRIu64 " %u %u", e->ts_ns, e->pid, e->syscall_id);
 		for (int i = 0; i < 6; i++)
 			fprintf(out, " %" PRIu64, e->args[i]);
-		fprintf(out, "\n");
+		print_path_space(out, e->path);
+		fprintf(out, " %u\n", (unsigned int)e->evt_kind);
 	}
 	fflush(out);
 
@@ -148,7 +206,6 @@ int main(int argc, char **argv)
 				setvbuf(out_file, NULL, _IOLBF, 0);
 				rb_ctx.out = out_file;
 				rb_ctx.csv = 1;
-				out_needs_fclose = 1;
 			}
 			break;
 		case 'v':
@@ -184,6 +241,12 @@ int main(int argc, char **argv)
 	}
 
 	skel->rodata->target_pid = target_pid;
+#ifdef __NR_open
+	skel->rodata->nr_open = (unsigned int)__NR_open;
+#else
+	skel->rodata->nr_open = 0;
+#endif
+	skel->rodata->nr_openat = (unsigned int)__NR_openat;
 
 	err = syscall_trace_bpf__load(skel);
 	if (err) {
@@ -207,10 +270,10 @@ int main(int argc, char **argv)
 
 	if (rb_ctx.csv)
 		fprintf(rb_ctx.out,
-			"ts_ns,pid,syscall_id,arg0,arg1,arg2,arg3,arg4,arg5\n");
+			"ts_ns,pid,syscall_id,arg0,arg1,arg2,arg3,arg4,arg5,path,evt_kind\n");
 	else
 		fprintf(rb_ctx.out,
-			"# ts_ns pid syscall_id arg0 arg1 arg2 arg3 arg4 arg5\n");
+			"# ts_ns pid syscall_id arg0..arg5 path evt_kind (evt_kind 1 = open fd+path)\n");
 	fflush(rb_ctx.out);
 
 	while (!stop) {

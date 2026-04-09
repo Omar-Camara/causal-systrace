@@ -6,6 +6,9 @@ Example:
   python src/analysis.py trace.csv
   python src/analysis.py trace.csv --enrich --head 10
   python src/analysis.py trace.csv --enrich --export-enriched data/enriched.csv
+
+Loader CSV may include path,evt_kind (evt_kind=1: open/openat resolved with fd in arg0).
+Enrichment maps fd -> pathname for subsequent syscalls that carry an fd (read, write, …).
 """
 
 from __future__ import annotations
@@ -120,6 +123,15 @@ _FD_ARG: dict[str, int] = {
 }
 
 
+def shorten_path_label(path: str, max_len: int = 56) -> str:
+    p = (path or "").strip()
+    if not p:
+        return "?"
+    if len(p) <= max_len:
+        return p
+    return "..." + p[-(max_len - 3) :]
+
+
 def infer_fd_for_name(name: str, row) -> int | None:
     if name == "?" or not name:
         return None
@@ -137,34 +149,95 @@ def infer_fd_for_name(name: str, row) -> int | None:
 
 
 def enrich_dataframe(df, sc_map: dict[int, str], pd):
-    """Add syscall_name, fd (when inferrable), channel (for grouping)."""
+    """Add syscall_name, fd (when inferrable), channel (for grouping).
+
+    If columns path / evt_kind exist (new loader), resolves fd -> file path over time
+    and uses pid:file:<path> channels when known.
+    """
     out = df.copy()
+    if "path" not in out.columns:
+        out["path"] = ""
+    if "evt_kind" not in out.columns:
+        out["evt_kind"] = 0
+    out["evt_kind"] = out["evt_kind"].fillna(0).astype(int)
+    out["path"] = out["path"].fillna("").astype(str)
+
     out["syscall_name"] = out["syscall_id"].map(
         lambda x: syscall_name(int(x), sc_map)
     )
 
-    def fd_one(row):
-        v = infer_fd_for_name(row["syscall_name"], row)
-        return v if v is not None else pd.NA
+    fd_map: dict[tuple[int, int], str] = {}
+    channels: list[str] = []
+    resources: list[object] = []
+    fds_col: list[object] = []
 
-    out["fd"] = out.apply(fd_one, axis=1)
+    sorted_idx = out.sort_values(["ts_ns", "evt_kind"], kind="stable").index
+
+    for i in sorted_idx:
+        row = out.loc[i]
+        pid = int(row["pid"])
+        name = row["syscall_name"]
+        ek = int(row["evt_kind"])
+
+        if ek == 1:
+            fd_new = -1
+            try:
+                fd_new = int(row["arg0"])
+            except (TypeError, ValueError):
+                pass
+            path = str(row["path"]).strip()
+            if fd_new >= 0 and path:
+                fd_map[(pid, fd_new)] = path
+            lab = shorten_path_label(path) if path else "?"
+            channels.append(f"{pid}:file:{lab}")
+            resources.append(path if path else pd.NA)
+            fds_col.append(fd_new if fd_new >= 0 else pd.NA)
+            continue
+
+        if name == "close":
+            fd_close = infer_fd_for_name(name, row)
+            if fd_close is not None:
+                fd_map.pop((pid, int(fd_close)), None)
+            channels.append(f"{pid}:sc:{name}")
+            resources.append(pd.NA)
+            fds_col.append(int(fd_close) if fd_close is not None else pd.NA)
+            continue
+
+        fd_val = infer_fd_for_name(name, row)
+        if fd_val is not None:
+            try:
+                fdi = int(fd_val)
+            except (TypeError, ValueError):
+                fdi = None
+            if fdi is not None and (pid, fdi) in fd_map:
+                p = fd_map[(pid, fdi)]
+                lab = shorten_path_label(p)
+                channels.append(f"{pid}:file:{lab}")
+                resources.append(p)
+                fds_col.append(fdi)
+                continue
+            if fdi is not None:
+                channels.append(f"{pid}:fd:{fdi}")
+                resources.append(pd.NA)
+                fds_col.append(fdi)
+                continue
+
+        channels.append(f"{pid}:sc:{name}")
+        resources.append(pd.NA)
+        fds_col.append(pd.NA)
+
+    # Restore original row order
+    ch_ser = pd.Series(channels, index=sorted_idx).reindex(out.index)
+    res_ser = pd.Series(resources, index=sorted_idx).reindex(out.index)
+    fd_ser = pd.Series(fds_col, index=sorted_idx).reindex(out.index)
+
+    out["fd"] = fd_ser
     try:
         out["fd"] = out["fd"].astype("Int64")
     except (TypeError, ValueError):
         pass
-
-    def channel_one(row):
-        pid = int(row["pid"])
-        nm = row["syscall_name"]
-        fd = row["fd"]
-        if pd.notna(fd):
-            try:
-                return f"{pid}:fd:{int(fd)}"
-            except (TypeError, ValueError):
-                pass
-        return f"{pid}:sc:{nm}"
-
-    out["channel"] = out.apply(channel_one, axis=1)
+    out["resource"] = res_ser
+    out["channel"] = ch_ser
     return out
 
 
@@ -191,7 +264,7 @@ def main() -> int:
     parser.add_argument(
         "--enrich",
         action="store_true",
-        help="Add syscall_name, fd (when inferrable), and channel (pid:fd:… or pid:sc:NAME)",
+        help="Add syscall_name, fd, resource (if known), channel (pid:file:… / pid:fd:… / pid:sc:NAME)",
     )
     parser.add_argument(
         "--export-enriched",
@@ -244,6 +317,10 @@ def main() -> int:
         print(f"unexpected columns; missing: {missing}", file=sys.stderr)
         print(f"got: {list(df.columns)}", file=sys.stderr)
         return 1
+
+    extra = [c for c in ("path", "evt_kind") if c in df.columns]
+    if extra:
+        print(f"optional loader columns: {', '.join(extra)}", file=sys.stderr)
 
     n = len(df)
     print(f"rows: {n}")
