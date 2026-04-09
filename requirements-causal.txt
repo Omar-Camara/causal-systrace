@@ -1,0 +1,6 @@
+# Full stack including optional causal-discovery tooling (heavy).
+-r requirements.txt
+
+# Uncomment when using CausalDiscoveryToolbox / PC / continuous methods:
+# cdt>=0.6.0
+# torch  # often required by cdt; pick CPU/GPU wheel from pytorch.org

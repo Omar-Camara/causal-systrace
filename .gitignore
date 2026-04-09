@@ -9,3 +9,10 @@ __pycache__/
 data/*.csv
 traces/*.csv
 trace.csv
+
+# Local-only instructions (personal paths, tokens, notes)
+LOCAL_SETUP.md
+
+# Generated graphs
+data/*.dot
+data/*.png
