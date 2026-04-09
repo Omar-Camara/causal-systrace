@@ -6,6 +6,7 @@ Input: CSV with ts_ns + channel (use: python src/analysis.py RAW.csv --enrich --
 
 Heuristic: for channels A,B, score = corr(A.shift(1), B) on time-bucket counts.
 If |score| >= threshold, emit edge A -> B (exploratory, not a formal causal claim).
+Very sparse channels or co-moving bursts can yield corr≈±1; interpret with care.
 
 Example:
   python src/causal.py data/enriched.csv --auto-window --dot data/graph.dot
@@ -31,13 +32,19 @@ def load_analysis_module():
     return mod
 
 
-def lag_corr(pivot: "pd.DataFrame", a: str, b: str) -> float:
+def lag_corr(
+    pivot: "pd.DataFrame", a: str, b: str, *, min_std: float = 1e-9
+) -> float:
     import pandas as pd
 
     x = pivot[a].shift(1)
     y = pivot[b]
     m = pd.concat([x, y], axis=1).dropna()
     if len(m) < 4:
+        return float("nan")
+    s0 = float(m.iloc[:, 0].std())
+    s1 = float(m.iloc[:, 1].std())
+    if s0 < min_std or s1 < min_std:
         return float("nan")
     c = m.iloc[:, 0].corr(m.iloc[:, 1])
     if c is None or (isinstance(c, float) and math.isnan(c)):
