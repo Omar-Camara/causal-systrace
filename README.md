@@ -11,29 +11,61 @@ eBPF **syscall enter** tracing (CO-RE **libbpf**), CSV export, pandas **enrichme
 ## Build
 
 ```bash
-make
+make clean && make
 ```
 
 Artifacts: `build/syscall_trace_loader`, `build/syscall_trace.bpf.o`.
 
 ## Collect (needs root)
 
-```bash
-sudo ./build/syscall_trace_loader -p 0 -n 1000 -o data/raw.csv
-```
-
-Or:
+**Quick smoke test (all PIDs, stops automatically — can be noisy):**
 
 ```bash
-python3 src/collector.py -p 0 -n 1000 -o data/raw.csv
+mkdir -p data
+sudo ./build/syscall_trace_loader -p 0 -n 800 -o data/raw.csv
 ```
 
-## Analyze & enrich
+**Trace one shell you control (replace `4182` with a real PID):**
+
+1. In the shell you want to trace, run `echo $$` (example output: `4182`).
+2. In another terminal, while you use that first shell (run `ls`, `cat` a file, etc.):
+
+```bash
+mkdir -p data
+sudo ./build/syscall_trace_loader -p 4182 -n 2000 -o data/raw.csv
+```
+
+The loader prints the CSV header, then one line per event; it looks idle until syscalls occur. Stop early with **Ctrl+C**, or let **`-n`** finish the run.
+
+Same thing via the Python wrapper:
+
+```bash
+python3 src/collector.py -p 0 -n 800 -o data/raw.csv
+```
+
+## Full pipeline (concrete example)
+
+From the repo root (after `make`), with a venv and deps:
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 
+make clean && make
+
+mkdir -p data
+sudo ./build/syscall_trace_loader -p 0 -n 800 -o data/raw.csv
+
+python src/analysis.py data/raw.csv --enrich --export-enriched data/enriched.csv
+python src/causal.py data/enriched.csv --auto-window --threshold 0.35 --dot data/graph.dot
+dot -Tpng data/graph.dot -o data/graph.png
+```
+
+Use **`-p 0`** only for short tests. For a cleaner graph, prefer **`-p <one_pid>`** and generate activity in that process while the loader runs.
+
+## Analyze & enrich
+
+```bash
 python src/analysis.py data/raw.csv --enrich --export-enriched data/enriched.csv
 ```
 
@@ -62,5 +94,7 @@ Raw CSV + `--auto-enrich` is supported if `ausyscall` or kernel headers are avai
 ## Note on VMs (e.g. Lima)
 
 If `/Users/...` is read-only in the guest, clone under **`~`** and run `make` there, or `make BUILD_DIR=/tmp/build`.
+
+If **`python src/analysis.py …` exits with `Killed`** (no traceback), the guest likely ran out of RAM (OOM killer). Give the VM more memory in `lima.yaml`, close other apps, or run analysis on a smaller `raw.csv` (e.g. lower **`-n`** when collecting).
 
 For machine-specific notes, use **`LOCAL_SETUP.md`** (gitignored if configured in `.gitignore`).

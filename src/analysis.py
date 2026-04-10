@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+
 # UAPI headers: arch-specific and asm-generic (merge; later defs can override)
 _UNISTD_CANDIDATES = (
     "/usr/include/asm-generic/unistd.h",
@@ -148,6 +150,18 @@ def infer_fd_for_name(name: str, row) -> int | None:
     return v
 
 
+def infer_fd_from_args(name: str, argrow: np.ndarray) -> int | None:
+    if name == "?" or not name:
+        return None
+    idx = _FD_ARG.get(name)
+    if idx is None or idx > 5:
+        return None
+    try:
+        return int(argrow[idx])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def enrich_dataframe(df, sc_map: dict[int, str], pd):
     """Add syscall_name, fd (when inferrable), channel (for grouping).
 
@@ -159,86 +173,85 @@ def enrich_dataframe(df, sc_map: dict[int, str], pd):
         out["path"] = ""
     if "evt_kind" not in out.columns:
         out["evt_kind"] = 0
-    out["evt_kind"] = out["evt_kind"].fillna(0).astype(int)
+    out["evt_kind"] = out["evt_kind"].fillna(0).astype(np.int64)
     out["path"] = out["path"].fillna("").astype(str)
 
-    out["syscall_name"] = out["syscall_id"].map(
-        lambda x: syscall_name(int(x), sc_map)
-    )
+    sid = pd.to_numeric(out["syscall_id"], errors="coerce").fillna(-1).astype(np.int64)
+    out["syscall_name"] = sid.map(sc_map).fillna("?").astype(str)
+
+    n = len(out)
+    out["_rowid"] = np.arange(n, dtype=np.int64)
+    work = out.sort_values(["ts_ns", "evt_kind", "_rowid"], kind="stable")
+
+    pids = work["pid"].to_numpy(dtype=np.int64, copy=False)
+    names = work["syscall_name"].astype(str).to_numpy(dtype=object, copy=False)
+    evt_kinds = work["evt_kind"].to_numpy(dtype=np.int64, copy=False)
+    paths = work["path"].to_numpy(dtype=object, copy=False)
+    rowids = work["_rowid"].to_numpy(dtype=np.int64, copy=False)
+    args = work[[f"arg{i}" for i in range(6)]].to_numpy(dtype=np.int64, copy=False)
+
+    ch_out: list[object] = [pd.NA] * n
+    res_out: list[object] = [pd.NA] * n
+    fd_out: list[object] = [pd.NA] * n
 
     fd_map: dict[tuple[int, int], str] = {}
-    channels: list[str] = []
-    resources: list[object] = []
-    fds_col: list[object] = []
+    wlen = len(work)
 
-    sorted_idx = out.sort_values(["ts_ns", "evt_kind"], kind="stable").index
-
-    for i in sorted_idx:
-        row = out.loc[i]
-        pid = int(row["pid"])
-        name = row["syscall_name"]
-        ek = int(row["evt_kind"])
+    for j in range(wlen):
+        pid = int(pids[j])
+        name = str(names[j])
+        ek = int(evt_kinds[j])
+        rid = int(rowids[j])
+        argrow = args[j]
 
         if ek == 1:
-            fd_new = -1
-            try:
-                fd_new = int(row["arg0"])
-            except (TypeError, ValueError):
-                pass
-            path = str(row["path"]).strip()
+            fd_new = int(argrow[0])
+            pv = paths[j]
+            path = "" if pd.isna(pv) else str(pv).strip()
             if fd_new >= 0 and path:
                 fd_map[(pid, fd_new)] = path
             lab = shorten_path_label(path) if path else "?"
-            channels.append(f"{pid}:file:{lab}")
-            resources.append(path if path else pd.NA)
-            fds_col.append(fd_new if fd_new >= 0 else pd.NA)
+            ch_out[rid] = f"{pid}:file:{lab}"
+            res_out[rid] = path if path else pd.NA
+            fd_out[rid] = fd_new if fd_new >= 0 else pd.NA
             continue
 
         if name == "close":
-            fd_close = infer_fd_for_name(name, row)
+            fd_close = infer_fd_from_args(name, argrow)
             if fd_close is not None:
                 fd_map.pop((pid, int(fd_close)), None)
-            channels.append(f"{pid}:sc:{name}")
-            resources.append(pd.NA)
-            fds_col.append(int(fd_close) if fd_close is not None else pd.NA)
+            ch_out[rid] = f"{pid}:sc:{name}"
+            res_out[rid] = pd.NA
+            fd_out[rid] = int(fd_close) if fd_close is not None else pd.NA
             continue
 
-        fd_val = infer_fd_for_name(name, row)
+        fd_val = infer_fd_from_args(name, argrow)
         if fd_val is not None:
-            try:
-                fdi = int(fd_val)
-            except (TypeError, ValueError):
-                fdi = None
-            if fdi is not None and (pid, fdi) in fd_map:
+            fdi = int(fd_val)
+            if (pid, fdi) in fd_map:
                 p = fd_map[(pid, fdi)]
                 lab = shorten_path_label(p)
-                channels.append(f"{pid}:file:{lab}")
-                resources.append(p)
-                fds_col.append(fdi)
+                ch_out[rid] = f"{pid}:file:{lab}"
+                res_out[rid] = p
+                fd_out[rid] = fdi
                 continue
-            if fdi is not None:
-                channels.append(f"{pid}:fd:{fdi}")
-                resources.append(pd.NA)
-                fds_col.append(fdi)
-                continue
+            ch_out[rid] = f"{pid}:fd:{fdi}"
+            res_out[rid] = pd.NA
+            fd_out[rid] = fdi
+            continue
 
-        channels.append(f"{pid}:sc:{name}")
-        resources.append(pd.NA)
-        fds_col.append(pd.NA)
+        ch_out[rid] = f"{pid}:sc:{name}"
+        res_out[rid] = pd.NA
+        fd_out[rid] = pd.NA
 
-    # Restore original row order
-    ch_ser = pd.Series(channels, index=sorted_idx).reindex(out.index)
-    res_ser = pd.Series(resources, index=sorted_idx).reindex(out.index)
-    fd_ser = pd.Series(fds_col, index=sorted_idx).reindex(out.index)
-
-    out["fd"] = fd_ser
+    out["fd"] = fd_out
     try:
         out["fd"] = out["fd"].astype("Int64")
     except (TypeError, ValueError):
         pass
-    out["resource"] = res_ser
-    out["channel"] = ch_ser
-    return out
+    out["resource"] = res_out
+    out["channel"] = ch_out
+    return out.drop(columns=["_rowid"], errors="ignore")
 
 
 def main() -> int:
@@ -293,7 +306,26 @@ def main() -> int:
         sc_map = {}
 
     try:
-        df = pd.read_csv(args.csv)
+        peek = pd.read_csv(args.csv, nrows=0)
+        colset = set(peek.columns)
+        dtype_map = {
+            c: "int64"
+            for c in (
+                "ts_ns",
+                "pid",
+                "syscall_id",
+                "arg0",
+                "arg1",
+                "arg2",
+                "arg3",
+                "arg4",
+                "arg5",
+            )
+            if c in colset
+        }
+        if "evt_kind" in colset:
+            dtype_map["evt_kind"] = "int64"
+        df = pd.read_csv(args.csv, dtype=dtype_map)
     except FileNotFoundError:
         print(f"not found: {args.csv}", file=sys.stderr)
         return 1
