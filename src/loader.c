@@ -52,6 +52,22 @@ static void on_sigint(int sig)
 	stop = 1;
 }
 
+static void setup_signals(void)
+{
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = on_sigint;
+	sigemptyset(&sa.sa_mask);
+	/*
+	 * No SA_RESTART: interrupted epoll_wait/poll returns EINTR so we exit
+	 * the ring buffer loop promptly on Ctrl+C.
+	 */
+	sa.sa_flags = 0;
+	if (sigaction(SIGINT, &sa, NULL) != 0 || sigaction(SIGTERM, &sa, NULL) != 0)
+		perror("warning: sigaction");
+}
+
 static void bump_memlock_rlimit(void)
 {
 	struct rlimit rlim = {
@@ -119,6 +135,13 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 	uint64_t *remain = c->remain;
 	const struct event *e = data;
 	FILE *out = c->out;
+
+	/*
+	 * ring_buffer__poll may drain many samples in one call; without this,
+	 * Ctrl+C sets stop but we do not observe it until the batch finishes.
+	 */
+	if (stop)
+		return 1;
 
 	if (data_sz < sizeof(*e)) {
 		fprintf(stderr, "short ringbuf sample: %zu (expected %zu)\n", data_sz,
@@ -230,8 +253,7 @@ int main(int argc, char **argv)
 	bump_memlock_rlimit();
 	libbpf_set_print(verbose ? libbpf_print : NULL);
 
-	signal(SIGINT, on_sigint);
-	signal(SIGTERM, on_sigint);
+	setup_signals();
 
 	skel = syscall_trace_bpf__open();
 	if (!skel) {
@@ -277,7 +299,8 @@ int main(int argc, char **argv)
 	fflush(rb_ctx.out);
 
 	while (!stop) {
-		err = ring_buffer__poll(rb, 100);
+		/* Short timeout so we re-check stop often even between poll calls. */
+		err = ring_buffer__poll(rb, 50);
 		if (err == -EINTR) {
 			err = 0;
 			break;
