@@ -66,6 +66,12 @@ def _collect_one(workload: Path, raw_out: Path) -> bool:
     if not workload.is_file():
         print(f"  workload missing: {workload}", file=sys.stderr)
         return False
+    # Workloads sleep ~4s first so a blocking `sudo` password prompt does not let them
+    # finish before the loader attaches (otherwise CSV stays header-only forever).
+    print(
+        "  (If prompted, enter sudo password now; workload waits 4s before syscalling.)",
+        file=sys.stderr,
+    )
     proc = subprocess.Popen(
         ["/bin/bash", str(workload)],
         stdout=subprocess.DEVNULL,
@@ -73,24 +79,52 @@ def _collect_one(workload: Path, raw_out: Path) -> bool:
         start_new_session=False,
     )
     pid = proc.pid
-    time.sleep(0.08)
+    time.sleep(0.15)
+    n_events = int(os.environ.get("CAUSAL_SYSTRACE_N", "250"))
     cmd = [
         "sudo",
         str(LOADER),
         "-p",
         str(pid),
         "-n",
-        "500",
+        str(n_events),
         "-o",
         str(raw_out),
     ]
     print(" ", " ".join(cmd))
-    rc = subprocess.run(cmd, cwd=str(ROOT)).returncode
+    # Avoid infinite hang if the PID never reaches -n events.
+    timeout_s = int(os.environ.get("CAUSAL_SYSTRACE_TIMEOUT", "90"))
+    try:
+        rc = subprocess.run(cmd, cwd=str(ROOT), timeout=timeout_s).returncode
+    except subprocess.TimeoutExpired:
+        print(f"  loader timed out after {timeout_s}s (partial CSV may exist)", file=sys.stderr)
+        rc = -1
     try:
         proc.wait(timeout=120)
     except subprocess.TimeoutExpired:
         proc.kill()
-    return rc == 0 and raw_out.is_file() and raw_out.stat().st_size > 50
+
+    if not raw_out.is_file():
+        return False
+    try:
+        text = raw_out.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    nlines = len(text.splitlines())
+    data_rows = max(0, nlines - 1)  # minus header
+    if data_rows < 1:
+        print(
+            "  trace has header only (no syscalls matched -p). "
+            "Often caused by: workload finished during `sudo` password prompt, or wrong PID.",
+            file=sys.stderr,
+        )
+        return False
+    if data_rows < 30:
+        print(
+            f"  warning: only {data_rows} syscall rows (increase CAUSAL_SYSTRACE_N or workload loops)",
+            file=sys.stderr,
+        )
+    return True
 
 
 def _fallback_synthetic() -> None:

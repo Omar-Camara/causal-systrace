@@ -3,8 +3,12 @@
 set -euo pipefail
 exec python3 - <<'PY'
 import pathlib
+import time
 import urllib.error
 import urllib.request
+
+# Let the parent start `sudo syscall_trace_loader` (password prompt) before we syscall.
+time.sleep(4)
 
 pathlib.Path("/etc/hostname").read_text()
 print(pathlib.Path("/etc/hostname").read_text().strip())
