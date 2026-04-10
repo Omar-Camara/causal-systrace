@@ -1,6 +1,9 @@
 # Full stack including optional causal-discovery tooling (heavy).
 -r requirements.txt
 
-# Uncomment when using CausalDiscoveryToolbox / PC / continuous methods:
+# PC algorithm (--method pc in src/causal.py); PyPI package name is causal-learn
+causal-learn>=0.1.3.6
+
+# Uncomment when using CausalDiscoveryToolbox / continuous methods:
 # cdt>=0.6.0
 # torch  # often required by cdt; pick CPU/GPU wheel from pytorch.org
