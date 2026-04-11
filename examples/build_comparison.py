@@ -50,23 +50,32 @@ def _causal_base() -> list[str]:
     ]
 
 
-# DOT lines from write_pc_dot:  "a" -> "b" [label="pc"];
+# DOT lines from write_pc_dot:  "a" -> "b" [label="pc"];  or  ... [label="pc?" dir=none ...];
 _DOT_EDGE_RE = re.compile(
     r'^\s*"((?:\\.|[^"\\])*)"\s*->\s*"((?:\\.|[^"\\])*)"\s*(?:\[[^\]]*\])?\s*;',
 )
+_DIR_NONE_RE = re.compile(r"dir\s*=\s*none", re.IGNORECASE)
 
 
 def _unescape(s: str) -> str:
     return s.replace('\\"', '"').replace("\\\\", "\\")
 
 
-def parse_pc_dot_edges(path: Path) -> set[tuple[str, str]]:
-    edges: set[tuple[str, str]] = set()
+def parse_pc_dot_edges(path: Path) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """Return (directed edges, undirected pairs as canonical (min,max) lexicographic)."""
+    directed: set[tuple[str, str]] = set()
+    undirected: set[tuple[str, str]] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         m = _DOT_EDGE_RE.match(line)
-        if m:
-            edges.add((_unescape(m.group(1)), _unescape(m.group(2))))
-    return edges
+        if not m:
+            continue
+        u, v = _unescape(m.group(1)), _unescape(m.group(2))
+        if _DIR_NONE_RE.search(line):
+            a, b = (u, v) if u <= v else (v, u)
+            undirected.add((a, b))
+        else:
+            directed.add((u, v))
+    return directed, undirected
 
 
 def main() -> int:
@@ -100,14 +109,20 @@ def main() -> int:
     print(f"wrote {CLEAN_PNG}")
     print(f"wrote {MAL_PNG}")
 
-    ec = parse_pc_dot_edges(CLEAN_DOT)
-    em = parse_pc_dot_edges(MAL_DOT)
-    only_mal = sorted(em - ec)
+    dc, uc = parse_pc_dot_edges(CLEAN_DOT)
+    dm, um = parse_pc_dot_edges(MAL_DOT)
+    only_mal_d = sorted(dm - dc)
+    only_mal_u = sorted(um - uc)
     print("\nDirected edges in malicious_pc.dot but not in clean_pc.dot:")
-    if not only_mal:
+    if not only_mal_d:
         print("  (none)")
-    for u, v in only_mal:
+    for u, v in only_mal_d:
         print(f"  {u} -> {v}")
+    print("\nUndirected (CPDAG) pairs in malicious only (not in clean):")
+    if not only_mal_u:
+        print("  (none)")
+    for u, v in only_mal_u:
+        print(f"  {u} -- {v}")
     return 0
 
 

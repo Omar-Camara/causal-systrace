@@ -63,11 +63,20 @@ def write_dot(path: Path, edges: list[tuple[str, str, float]]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_pc_dot(path: Path, directed_edges: list[tuple[str, str]]) -> None:
-    """Write a DAG-style DOT from oriented PC edges only (no correlation weight)."""
+def write_pc_dot(
+    path: Path,
+    directed_edges: list[tuple[str, str]],
+    undirected_edges: list[tuple[str, str]] | None = None,
+) -> None:
+    """Write DOT from PC/CPDAG: solid arrows (oriented) + dashed dir=none (ambiguous)."""
     lines = ["digraph G {", "  rankdir=LR;", "  node [shape=box];"]
     for u, v in directed_edges:
         lines.append(f"  {dot_label(u)} -> {dot_label(v)} [label={dot_label('pc')}];")
+    for u, v in undirected_edges or []:
+        lines.append(
+            f"  {dot_label(u)} -> {dot_label(v)} "
+            f"[label={dot_label('pc?')} dir=none style=dashed];"
+        )
     lines.append("}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -133,9 +142,11 @@ def run_pc_method(
     pivot: "pd.DataFrame",
     cols: list[str],
     n_bk: int,
-) -> tuple[list[tuple[str, str, float]], list[tuple[str, str]]] | None:
+) -> tuple[
+    list[tuple[str, str, float]], list[tuple[str, str]], list[tuple[str, str]]
+] | None:
     """
-    Run PC; return (edges_with dummy weight for logging, directed_edges for DOT) or None on failure.
+    Run PC; return (weighted edges for logging, directed_edges, undirected_edges for CPDAG) or None.
     """
     try:
         from causallearn.search.ConstraintBased.PC import pc
@@ -214,15 +225,30 @@ def run_pc_method(
     G = cg.G
     nodes = G.get_nodes()
     directed: list[tuple[str, str]] = []
-    for u in nodes:
-        for v in nodes:
-            if u is v:
+    undirected: list[tuple[str, str]] = []
+    for i, u in enumerate(nodes):
+        for v in nodes[i + 1 :]:
+            if not G.is_adjacent_to(u, v):
                 continue
+            un, vn = u.get_name(), v.get_name()
             if G.is_directed_from_to(u, v):
-                directed.append((u.get_name(), v.get_name()))
+                directed.append((un, vn))
+            elif G.is_directed_from_to(v, u):
+                directed.append((vn, un))
+            elif G.is_undirected_from_to(u, v):
+                undirected.append((un, vn))
+            else:
+                # partially oriented / other CPDAG marks — still show adjacency
+                undirected.append((un, vn))
 
-    edges_weighted = [(a, b, 1.0) for a, b in directed]
-    return edges_weighted, directed
+    edges_weighted = [(a, b, 1.0) for a, b in directed] + [
+        (a, b, 0.0) for a, b in undirected
+    ]
+    print(
+        f"pc: graph has {len(directed)} directed edge(s), {len(undirected)} undirected (CPDAG)",
+        file=sys.stderr,
+    )
+    return edges_weighted, directed, undirected
 
 
 def main() -> int:
@@ -344,16 +370,21 @@ def main() -> int:
     pc_out = run_pc_method(pivot, cols, n_bk)
     if pc_out is None:
         return 1
-    weighted, directed = pc_out
-    print(f"buckets: {pivot.shape[0]}  channels: {len(cols)}  directed_edges: {len(directed)}")
-    for u, v, _ in weighted[:50]:
-        print(f"  {u} -> {v}  (pc)")
+    weighted, directed, undirected = pc_out
+    n_dir, n_ud = len(directed), len(undirected)
+    print(
+        f"buckets: {pivot.shape[0]}  channels: {len(cols)}  "
+        f"edges: {n_dir} directed + {n_ud} undirected (CPDAG)"
+    )
+    for u, v, w in weighted[:50]:
+        tag = "pc" if w > 0.5 else "pc?"
+        print(f"  {u} -> {v}  ({tag})")
     if len(weighted) > 50:
         print(f"  ... ({len(weighted) - 50} more)")
 
     if args.dot:
         args.dot.parent.mkdir(parents=True, exist_ok=True)
-        write_pc_dot(args.dot, directed)
+        write_pc_dot(args.dot, directed, undirected)
         print(f"wrote {args.dot}", file=sys.stderr)
     return 0
 
