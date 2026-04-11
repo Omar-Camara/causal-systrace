@@ -87,7 +87,8 @@ def _collect_one(workload: Path, raw_out: Path) -> bool:
     )
     pid = proc.pid
     time.sleep(0.15)
-    n_events = int(os.environ.get("CAUSAL_SYSTRACE_N", "250"))
+    # Higher default captures a longer slice of workload wall time → wider ts span → more time buckets.
+    n_events = int(os.environ.get("CAUSAL_SYSTRACE_N", "500"))
     cmd = [
         "sudo",
         str(LOADER),

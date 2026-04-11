@@ -88,6 +88,7 @@ def build_bucket_pivot(
     auto_window: bool,
     min_buckets: int,
     window_ms: float,
+    auto_slices: int = 0,
 ) -> tuple["pd.DataFrame", list[str], int, float] | tuple[None, None, int, float]:
     """
     Return (pivot float64, column names, n_buckets, span_ms) or (None, None, n_bk, span_ms) on failure.
@@ -98,7 +99,10 @@ def build_bucket_pivot(
     span_ms = span_ns / 1e6
 
     if auto_window:
-        target = max(min_buckets, 2) + 2
+        if auto_slices > 0:
+            target = max(int(auto_slices), 3)
+        else:
+            target = max(min_buckets, 2) + 2
         window_ns = max(1, span_ns // target)
         used_ms = window_ns / 1e6
         print(
@@ -269,7 +273,14 @@ def main() -> int:
     parser.add_argument(
         "--auto-window",
         action="store_true",
-        help="Pick bucket width from trace span so roughly (min-buckets+2) buckets fit (overrides --window-ms)",
+        help="Pick bucket width from trace span (overrides --window-ms); width from --auto-slices or min-buckets",
+    )
+    parser.add_argument(
+        "--auto-slices",
+        type=int,
+        default=0,
+        metavar="N",
+        help="With --auto-window, use ~N buckets across the trace span (0 = use --min-buckets+2; try 16+ for demos)",
     )
     parser.add_argument(
         "--threshold",
@@ -335,6 +346,7 @@ def main() -> int:
         auto_window=args.auto_window,
         min_buckets=args.min_buckets,
         window_ms=args.window_ms,
+        auto_slices=args.auto_slices,
     )
     pivot, cols, n_bk, span_ms = built
     if pivot is None or cols is None:
