@@ -37,11 +37,18 @@ CLEAN_OUT = EXAMPLES / "clean_enriched.csv"
 MAL_OUT = EXAMPLES / "malicious_enriched.csv"
 
 
-def _validate_enriched(path: Path, label: str) -> bool:
+def _validate_enriched(
+    path: Path,
+    label: str,
+    *,
+    min_rows: int = 50,
+    min_channels: int = 5,
+) -> bool:
+    """Single-PID loader traces often have ~6–10 distinct channels; do not require >8."""
     df = pd.read_csv(path)
     n = len(df)
     nu = df["channel"].nunique() if "channel" in df.columns else 0
-    ok = n > 50 and nu > 8
+    ok = n > min_rows and nu >= min_channels
     print(f"  {label}: rows={n} unique_channels={nu} ok={ok}")
     return ok
 
@@ -245,12 +252,20 @@ def main() -> int:
             if _run_enrich(MAL_RAW, MAL_OUT) != 0:
                 print("enrich malicious failed", file=sys.stderr)
                 ok_m = False
-        if ok_c and ok_m and _validate_enriched(CLEAN_OUT, "clean") and _validate_enriched(
-            MAL_OUT, "malicious"
-        ):
-            print("Real-trace artifacts OK.")
-            return 0
-        print("Real trace path failed; using FALLBACK.", file=sys.stderr)
+        if ok_c and ok_m:
+            if _validate_enriched(CLEAN_OUT, "clean") and _validate_enriched(
+                MAL_OUT, "malicious"
+            ):
+                print("Real-trace artifacts OK.")
+                return 0
+            print(
+                "  Real CSVs were written but failed validation; "
+                "not overwriting with FALLBACK (fix trace size or min_channels).",
+                file=sys.stderr,
+            )
+            return 1
+
+        print("Real trace collection or enrich failed; using FALLBACK.", file=sys.stderr)
 
     _fallback_synthetic()
     ok1 = _validate_enriched(CLEAN_OUT, "clean (fallback)")

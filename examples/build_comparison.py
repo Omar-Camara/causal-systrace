@@ -10,6 +10,7 @@ Requires: examples/clean_enriched.csv and examples/malicious_enriched.csv
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -26,12 +27,32 @@ MAL_DOT = EXAMPLES / "malicious_pc.dot"
 CLEAN_PNG = EXAMPLES / "clean_pc.png"
 MAL_PNG = EXAMPLES / "malicious_pc.png"
 
-# Wider buckets => more samples than channels for PC on fallback traces
-WINDOW_MS = 25.0
+# Short real loader traces (~few ms span): fixed large --window-ms collapses to 1 bucket.
+# --auto-window fits min-buckets across the actual span; long synthetic traces still work.
+# Override: CAUSAL_SYSTRACE_WINDOW_MS=0.5 python3 examples/build_comparison.py
+def _causal_base() -> list[str]:
+    w = os.environ.get("CAUSAL_SYSTRACE_WINDOW_MS", "").strip()
+    if w:
+        return [
+            sys.executable,
+            str(CAUSAL),
+            "--method",
+            "pc",
+            "--window-ms",
+            w,
+        ]
+    return [
+        sys.executable,
+        str(CAUSAL),
+        "--method",
+        "pc",
+        "--auto-window",
+    ]
+
 
 # DOT lines from write_pc_dot:  "a" -> "b" [label="pc"];
 _DOT_EDGE_RE = re.compile(
-    r'^\s*"((?:\\.|[^"\\])*)"\s*->\s*"((?:\\.|[^"\\])*)"\s*;',
+    r'^\s*"((?:\\.|[^"\\])*)"\s*->\s*"((?:\\.|[^"\\])*)"\s*(?:\[[^\]]*\])?\s*;',
 )
 
 
@@ -60,14 +81,7 @@ def main() -> int:
         print("graphviz `dot` not found on PATH; install graphviz.", file=sys.stderr)
         return 1
 
-    base = [
-        sys.executable,
-        str(CAUSAL),
-        "--method",
-        "pc",
-        "--window-ms",
-        str(WINDOW_MS),
-    ]
+    base = _causal_base()
     r1 = subprocess.run([*base, str(CLEAN_CSV), "--dot", str(CLEAN_DOT)], cwd=str(ROOT))
     r2 = subprocess.run([*base, str(MAL_CSV), "--dot", str(MAL_DOT)], cwd=str(ROOT))
     if r1.returncode != 0 or r2.returncode != 0:
