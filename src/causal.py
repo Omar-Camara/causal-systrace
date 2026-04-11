@@ -164,23 +164,53 @@ def run_pc_method(
 
     sub = pivot[keep].astype(np.float64)
     n_vars = sub.shape[1]
-    if n_bk < n_vars:
+    # Fisher-Z needs a well-conditioned correlation matrix: need n_samples > n_vars
+    # and bucketed counts are often rank-deficient — cap variables and add tiny jitter.
+    max_vars = max(2, min(n_vars, n_bk - 2))
+    if n_vars > max_vars:
+        totals = sub.sum(axis=0).sort_values(ascending=False)
+        slim = list(totals.index[:max_vars])
+        dropped2 = sorted(set(keep) - set(slim))
         print(
-            f"pc: warning — time buckets ({n_bk}) < channels ({n_vars}). "
-            "PC needs roughly more samples than variables; try a larger --window-ms "
-            "(fewer, wider buckets) or a longer trace.",
+            f"pc: using top {max_vars} channel(s) by bucket totals (dropped {len(dropped2)} "
+            f"so samples={n_bk} > variables; collect longer traces or widen buckets for full set)",
             file=sys.stderr,
         )
+        keep = slim
+        sub = pivot[keep].astype(np.float64)
+        n_vars = sub.shape[1]
 
+    if n_bk <= n_vars:
+        print(
+            f"pc: need more time buckets than channels (buckets={n_bk}, channels={n_vars}); "
+            "try --window-ms smaller / longer trace / CAUSAL_SYSTRACE_N higher in build_real_artifacts.py",
+            file=sys.stderr,
+        )
+        return None
+
+    rng = np.random.default_rng(42)
     data = np.asarray(sub.values, dtype=np.float64)
-    cg = pc(
-        data,
-        alpha=0.05,
-        indep_test="fisherz",
-        node_names=keep,
-        verbose=False,
-        show_progress=False,
-    )
+    data = data + rng.normal(0.0, 1e-4, size=data.shape)
+
+    try:
+        cg = pc(
+            data,
+            alpha=0.05,
+            indep_test="fisherz",
+            node_names=keep,
+            verbose=False,
+            show_progress=False,
+        )
+    except ValueError as e:
+        if "singular" in str(e).lower() or "fisherz" in str(e).lower():
+            print(
+                "pc: Fisher-Z failed (singular / ill-conditioned correlation on bucket counts). "
+                "Try more events (-n), more buckets (smaller --window-ms), or --method corr.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"pc: {e}", file=sys.stderr)
+        return None
     G = cg.G
     nodes = G.get_nodes()
     directed: list[tuple[str, str]] = []
